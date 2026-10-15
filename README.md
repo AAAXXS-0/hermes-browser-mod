@@ -4,7 +4,9 @@
 
 独立 stdio MCP 服务提供 16 个工具；可选接入 **Hermes Agent CN Desktop v0.9.0** 的原生预览栏。它不是 Chrome 扩展，也不是官方 Hermes Desktop SDK 插件。目前不承诺其他桌面版本、操作系统或远程 Hermes 兼容。
 
-![使用独立练习页验证的浏览器界面](docs/images/demo.png)
+![Hermes CN Desktop 原生侧栏浏览器集成实拍](docs/images/integrated.png)
+
+*图为 CN Desktop v0.9.0 + 本地 Mod V1.5.1 的实际运行界面；当前公开源码版本为 V1.6.0。*
 
 ## 能做什么
 
