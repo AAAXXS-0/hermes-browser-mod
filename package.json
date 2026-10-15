@@ -1,0 +1,34 @@
+{
+  "name": "hermes-browser-mod",
+  "version": "1.6.0",
+  "private": true,
+  "type": "module",
+  "description": "可插拔的 Hermes 伴随式浏览器 demo",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/launcher.mjs",
+    "serve": "node src/server.mjs",
+    "stop": "node src/launcher.mjs --stop",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "mcp": "node src/mcp.mjs",
+    "hermes:connect": "node src/adapter.mjs connect",
+    "hermes:disconnect": "node src/adapter.mjs disconnect",
+    "desktop:install": "node src/integration.mjs install",
+    "desktop:remove": "node src/integration.mjs remove",
+    "native:build": "node scripts/build-native.mjs",
+    "native:install": "node src/native-adapter.mjs install",
+    "native:remove": "node src/native-adapter.mjs remove",
+    "native:prepare": "node scripts/prepare-native.mjs",
+    "release:check": "node scripts/release-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "playwright": "1.64.0",
+    "ws": "8.22.0",
+    "yaml": "2.9.1"
+  },
+  "license": "MIT"
+}

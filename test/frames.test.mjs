@@ -1,0 +1,108 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { createModServer } from '../src/server.mjs';
+import { ROOT, RUNTIME } from '../src/paths.mjs';
+
+// Two origins and a nested editor reproduce the missing-frame failure without
+// using any real course, login, answer or private site HTML.
+const main = '<!doctype html><title>Frame fixture</title><style>body{margin:0}iframe{position:absolute;left:340px;top:120px;width:660px;height:510px;border:6px solid;transform:scale(1.1);transform-origin:top left}</style><button>外层按钮</button><iframe title="练习区域" src="http://127.0.0.1:17385/frame-child"></iframe>';
+const child = '<!doctype html><meta charset="utf-8"><style>body{margin:0}button{position:absolute;left:40px;top:40px;width:120px;height:50px}iframe{position:absolute;left:40px;top:120px;width:480px;height:260px;border:4px solid}</style><button onclick="document.querySelector(\'p\').textContent=\'已切换\'">下一题</button><p>等待</p><iframe title="富文本" src="http://localhost:17385/frame-editor"></iframe>';
+const editor = '<!doctype html><meta charset="utf-8"><style>body{margin:0}[contenteditable]{margin:15px;height:170px;border:1px solid}</style><div contenteditable="true" role="textbox" aria-label="答案编辑器"></div><script>window.inputEvents=[];window.keyEvents=[];window.pastes=0;document.addEventListener("paste",e=>{e.preventDefault();window.pastes++});document.addEventListener("input",e=>window.inputEvents.push({data:e.data,trusted:e.isTrusted}));document.addEventListener("keydown",e=>window.keyEvents.push(e.key));</script>';
+
+test('跨域嵌套 iframe：ref、真实命中、逐字中文输入、旧图和接管中断', { timeout: 120000 }, async t => {
+  const port = 17385;
+  const runtime = path.join(RUNTIME, `frames-test-${Date.now()}`);
+  const mod = await createModServer({ port, runtimeDir: runtime, profile: path.join(runtime, 'profile') });
+  let client;
+  t.after(async () => { await client?.close(); await mod.close(); });
+  const page = mod.browser.activePage();
+  await page.route('**/frame-*', route => {
+    const pathname = new URL(route.request().url()).pathname;
+    return route.fulfill({ contentType: 'text/html; charset=utf-8', body: pathname === '/frame-main' ? main : pathname === '/frame-child' ? child : editor });
+  });
+  await page.goto(`http://localhost:${port}/frame-main`);
+  const inner = page.frames().find(frame => frame.url().endsWith('/frame-editor'));
+  assert.ok(inner);
+  const childFrame = page.frames().find(frame => frame.url().endsWith('/frame-child'));
+  client = new Client({ name: 'frames-regression', version: '1.3.0' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'src', 'mcp.mjs')], env: { ...process.env, HBM_PORT: String(port), HBM_RUNTIME_DIR: runtime } }));
+  const call = (name, args = {}) => client.callTool({ name, arguments: args });
+  const invoke = async (name, args = {}) => {
+    const result = await call(name, args);
+    assert.ok(!result.isError, JSON.stringify(result));
+    return JSON.parse(result.content.find(item => item.type === 'text').text);
+  };
+  const snapshot = await invoke('browser_snapshot');
+  assert.equal(snapshot.frames.length, 3);
+  const next = snapshot.elements.find(element => element.label === '下一题');
+  const input = snapshot.elements.find(element => element.label === '答案编辑器');
+  assert.ok(next && input);
+  assert.equal(input.kind, 'editor');
+  assert.notEqual(input.frameId, next.frameId);
+  const box = await inner.getByRole('textbox').boundingBox();
+  assert.ok(Math.abs(input.rect.x - box.x) < 1);
+  assert.ok(input.rect.x > input.frameRect.x);
+  await invoke('browser_click', { ref: next.ref });
+  assert.equal(await childFrame.locator('p').innerText(), '已切换');
+  await invoke('browser_fill', { ref: input.ref, text: '嵌套中文测试' });
+  assert.equal(await inner.getByRole('textbox').innerText(), '嵌套中文测试');
+  let shot = await invoke('browser_screenshot');
+  const result = await invoke('browser_click_at', { screenshotId: shot.screenshotId, x: box.x + box.width / 2, y: box.y + box.height / 2 });
+  assert.equal(result.actionResult.target.label, '答案编辑器');
+  assert.equal(result.actionResult.framePath.length, 3);
+  assert.equal(result.actionResult.target.editable, true);
+  // Border hit should remain on the outer iframe, rather than enter the child.
+  shot = await invoke('browser_screenshot');
+  const border = await invoke('browser_click_at', { screenshotId: shot.screenshotId, x: 342, y: 122 });
+  assert.equal(border.actionResult.target.tag, 'iframe');
+  assert.equal(border.actionResult.framePath.length, 1);
+  shot = await invoke('browser_screenshot');
+  await inner.getByRole('textbox').evaluate(node => node.textContent = '子页面发生变化');
+  const stale = await call('browser_click_at', { screenshotId: shot.screenshotId, x: box.x + 20, y: box.y + 20 });
+  assert.equal(stale.isError, true);
+  assert.match(stale.content[0].text, /页面.*变化/);
+  const oldRef = input.ref;
+  await invoke('browser_snapshot');
+  assert.equal((await call('browser_fill', { ref: oldRef, text: '旧引用' })).isError, true);
+  shot = await invoke('browser_screenshot');
+  await inner.goto(`http://localhost:${port}/frame-editor`);
+  assert.equal((await call('browser_click_at', { screenshotId: shot.screenshotId, x: box.x + 20, y: box.y + 20 })).isError, true);
+
+  const latest = await invoke('browser_snapshot');
+  const editorRef = latest.elements.find(element => element.label === '答案编辑器').ref;
+  const typed = await invoke('browser_type', { ref: editorRef, text: 'ab中文🙂\n第二行', delayMs: 0 });
+  assert.equal(typed.actionResult.charactersTyped, 9);
+  assert.equal(await inner.getByRole('textbox').innerText(), 'ab中文🙂\n第二行');
+  const events = await inner.evaluate(() => ({ inputEvents, keyEvents, pastes }));
+  assert.equal(events.pastes, 0);
+  assert.ok(events.inputEvents.every(event => event.trusted));
+  assert.ok(events.inputEvents.some(event => event.data === '中'));
+  assert.ok(events.inputEvents.some(event => event.data === '文'));
+  assert.ok(events.keyEvents.includes('a') && events.keyEvents.includes('Enter'));
+  await invoke('browser_press', { key: 'End' });
+  await invoke('browser_type', { text: '尾部', delayMs: 0 });
+  assert.match(await inner.getByRole('textbox').innerText(), /第二行尾部/);
+  assert.equal(typed.events, undefined, 'Agent 操作返回不重复历史事件');
+  assert.ok(JSON.stringify(typed).length < 1600);
+  const confirmation = await invoke('browser_snapshot');
+  assert.match(confirmation.elements.find(element => element.label === '答案编辑器').value, /第二行尾部/);
+  await page.getByRole('button', { name: '外层按钮' }).focus();
+  const wrongFocus = await call('browser_type', { text: '不能写到按钮上' });
+  assert.equal(wrongFocus.isError, true);
+  assert.match(wrongFocus.content[0].text, /焦点不是可输入编辑器/);
+  assert.equal((await call('browser_type', { text: 'x'.repeat(501) })).isError, true);
+  await invoke('browser_fill', { ref: confirmation.elements.find(element => element.label === '答案编辑器').ref, text: '' });
+  const partial = call('browser_type', { ref: confirmation.elements.find(element => element.label === '答案编辑器').ref, text: '接管测试'.repeat(30), delayMs: 50 });
+  await inner.waitForFunction(() => document.querySelector('[contenteditable]').innerText.length >= 2);
+  await mod.browser.run('control', { owner: 'manual' }, 'ui');
+  const interrupted = await partial;
+  assert.equal(interrupted.isError, true);
+  assert.match(interrupted.content[0].text, /用户已手动接管.*本次已发送/);
+  const stopped = await inner.getByRole('textbox').innerText();
+  assert.ok(stopped.length < 120);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(await inner.getByRole('textbox').innerText(), stopped);
+});

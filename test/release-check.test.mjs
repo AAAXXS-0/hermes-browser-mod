@@ -1,0 +1,27 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { ROOT, RUNTIME, VERSION } from '../src/paths.mjs';
+test('发布扫描拒绝已从当前文件删除、仍藏在历史中的 token', async () => {
+  const dir = await fs.mkdtemp(path.join(RUNTIME, 'release-check-test-'));
+  for (const folder of ['scripts', 'src', 'desktop/dashboard', 'licenses']) await fs.mkdir(path.join(dir, folder), { recursive: true });
+  await fs.copyFile(path.join(ROOT, 'scripts/release-check.mjs'), path.join(dir, 'scripts/release-check.mjs'));
+  await fs.copyFile(path.join(ROOT, 'LICENSE'), path.join(dir, 'LICENSE'));
+  await fs.copyFile(path.join(ROOT, 'licenses/Hermes-CN-Desktop-v0.9.0.LICENSE.txt'), path.join(dir, 'licenses/Hermes-CN-Desktop-v0.9.0.LICENSE.txt'));
+  await fs.writeFile(path.join(dir, 'src/paths.mjs'), 'import {fileURLToPath} from "node:url";export const ROOT=fileURLToPath(new URL("../",import.meta.url));export const VERSION=' + JSON.stringify(VERSION) + ';');
+  await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({ type: 'module', version: VERSION, license: 'MIT' }));
+  await fs.writeFile(path.join(dir, 'package-lock.json'), JSON.stringify({ version: VERSION, packages: { '': { version: VERSION } } }));
+  await fs.writeFile(path.join(dir, 'desktop/dashboard/manifest.json'), JSON.stringify({ version: VERSION }));
+  const git = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  const scan = () => execFileSync(process.execPath, [path.join(dir, 'scripts/release-check.mjs')], { cwd: dir, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+  git(['init', '-b', 'main']); git(['config', 'user.name', 'fixture']); git(['config', 'user.email', 'fixture@local.invalid']); git(['add', '.']);
+  assert.match(scan(), /发布检查通过/);
+  git(['commit', '-m', 'clean fixture']);
+  await fs.writeFile(path.join(dir, 'notes.md'), 'ghp_' + 'A'.repeat(36));
+  git(['add', '.']); git(['commit', '-m', 'synthetic token fixture']);
+  await fs.writeFile(path.join(dir, 'notes.md'), 'cleaned');
+  git(['add', '.']); git(['commit', '-m', 'clean current file']);
+  assert.throws(scan, error => error.stderr.includes('Git history: GitHub token'));
+});

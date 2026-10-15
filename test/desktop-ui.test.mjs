@@ -1,0 +1,70 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { chromium } from 'playwright';
+import { createModServer } from '../src/server.mjs';
+import { ROOT, RUNTIME } from '../src/paths.mjs';
+
+test('嵌入视图保持预览、指针、手动输入和接管，不展示独立 demo 控制区', { timeout: 90000 }, async t => {
+  const runtime = path.join(RUNTIME, `embedded-test-${Date.now()}`);
+  const mod = await createModServer({ port: 17387, runtimeDir: runtime, profile: path.join(runtime, 'profile') });
+  const uiBrowser = await chromium.launch({ channel: 'msedge', headless: true, artifactsDir: path.join(runtime, 'ui-artifacts') });
+  t.after(async () => { await uiBrowser.close(); await mod.close(); });
+  const ui = await uiBrowser.newPage({ viewport: { width: 520, height: 850 } });
+  await ui.goto(`${mod.origin}/?embedded=1`);
+  await ui.locator('#frame').waitFor({ state: 'visible' });
+  assert.equal(await ui.locator('.workspace').isVisible(), false);
+  assert.equal(await ui.locator('.rail').isVisible(), false);
+  assert.equal(await ui.locator('.app-header').isVisible(), false);
+  const panel = await ui.locator('.browser-panel').boundingBox();
+  assert.ok(panel.width <= 520 && panel.height <= 850);
+  await ui.getByRole('button', { name: '手动接管', exact: true }).click();
+  await ui.getByRole('button', { name: '交还 Agent', exact: true }).waitFor();
+  const input = await mod.browser.activePage().locator('#name').boundingBox();
+  const screen = await ui.locator('#screen').boundingBox();
+  const scale = Math.min(screen.width / 1280, screen.height / 800);
+  await ui.mouse.click(screen.x + (screen.width - 1280 * scale) / 2 + (input.x + input.width / 2) * scale, screen.y + (screen.height - 800 * scale) / 2 + (input.y + input.height / 2) * scale);
+  await ui.keyboard.press('Control+A');
+  await ui.keyboard.insertText('嵌入侧栏中文输入');
+  await mod.browser.activePage().waitForFunction(() => document.querySelector('#name').value === '嵌入侧栏中文输入');
+  await ui.getByRole('button', { name: '交还 Agent', exact: true }).click();
+  assert.equal(mod.browser.owner, 'agent');
+});
+
+test('真实 Hermes SDK 聊天侧栏：并排、折叠恢复、拖动宽度与同会话预览', { timeout: 90000, skip: !process.env.HBM_HERMES_DASHBOARD_URL }, async t => {
+  const runtime = path.join(RUNTIME, `desktop-ui-test-${Date.now()}`);
+  const mod = await createModServer({ port: 17388, runtimeDir: runtime, profile: path.join(runtime, 'profile') });
+  const uiBrowser = await chromium.launch({ channel: 'msedge', headless: true, artifactsDir: path.join(runtime, 'ui-artifacts') });
+  t.after(async () => { await uiBrowser.close(); await mod.close(); });
+  const ui = await uiBrowser.newPage({ viewport: { width: 1600, height: 980 } });
+  // Use the installed SDK/Chat layout, but replace only our plugin's bridge
+  // endpoints with test state. No messages are sent to the real agent.
+  await ui.route('**/api/plugins/hermes-browser-mod/**', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ running: true, origin: mod.origin, version: 'test' }) }));
+  await ui.goto(`${process.env.HBM_HERMES_DASHBOARD_URL}/chat`);
+  await ui.waitForFunction(() => window.__HERMES_PLUGIN_SDK__?.React && window.__HERMES_PLUGINS__?.registerSlot);
+  await ui.addStyleTag({ path: path.join(ROOT, 'desktop/dashboard/plugin.css') });
+  await ui.addScriptTag({ path: path.join(ROOT, 'desktop/dashboard/plugin.js') });
+  await ui.getByRole('complementary', { name: '浏览器侧栏' }).waitFor();
+  const frame = ui.frameLocator('iframe[title="Hermes 浏览器"]');
+  await frame.locator('#frame').waitFor({ state: 'visible' });
+  const root = await ui.locator('.hbm-slot').evaluate(node => ({ padding: parseFloat(node.parentElement.style.paddingRight), width: node.parentElement.getBoundingClientRect().width }));
+  assert.ok(root.padding >= 332);
+  const before = await ui.locator('.hbm-dock').boundingBox();
+  const grip = await ui.getByRole('separator', { name: '调整浏览器宽度' }).boundingBox();
+  await ui.mouse.move(grip.x + 3, grip.y + 100);
+  await ui.mouse.down();
+  await ui.mouse.move(grip.x - 80, grip.y + 100, { steps: 4 });
+  await ui.mouse.up();
+  await ui.waitForTimeout(100);
+  const wider = await ui.locator('.hbm-dock').boundingBox();
+  assert.ok(wider.width > before.width + 50);
+  await ui.getByRole('button', { name: '收起浏览器', exact: true }).click();
+  assert.equal(await ui.locator('.hbm-dock').count(), 0);
+  assert.equal(await ui.locator('.hbm-slot').evaluate(node => node.parentElement.style.paddingRight), '');
+  await ui.getByRole('button', { name: '打开浏览器', exact: true }).click();
+  await frame.locator('#frame').waitFor({ state: 'visible' });
+  assert.equal(mod.browser.pages.size, 1, '折叠/展开复用浏览器，不新建会话');
+  await fs.mkdir(path.join(ROOT, 'artifacts'), { recursive: true });
+  await ui.screenshot({ path: path.join(ROOT, 'artifacts', 'V1.4.0-desktop-integration.png'), fullPage: true });
+});

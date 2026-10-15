@@ -1,0 +1,12 @@
+{
+  "name": "hermes-browser-mod",
+  "label": "浏览器",
+  "description": "独立浏览器实时预览、MCP 操作与手动接管，可折叠到聊天右侧。",
+  "icon": "Globe",
+  "version": "1.6.0",
+  "tab": { "path": "/browser-mod", "position": "after:chat" },
+  "slots": ["chat:top"],
+  "entry": "plugin.js",
+  "css": "plugin.css",
+  "api": "plugin_api.py"
+}
